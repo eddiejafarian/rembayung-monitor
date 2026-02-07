@@ -2,23 +2,45 @@ import requests
 import smtplib
 import os
 import time
+from email.mime.text import MIMEText
+from email.mime.multipart import MIMEMultipart
 
-URL = "https://reservation.umai.io/en/widget/rembayung"
-KEYWORD = "We are fully booked"
-
-COOLDOWN = 60 * 60 * 2  # 2 hours (seconds)
+# ---------- SETTINGS ----------
 STATE_FILE = "last_alert.txt"
+COOLDOWN = 60 * 60 * 2  # 2 hours
+BOOKING_URL = "https://reservation.umai.io/en/widget/rembayung"
+API_URL = "https://reservation.umai.io/api/venues/rembayung/availability"
+# ------------------------------
 
 
-def page_available():
+def booking_available():
+    """Check UMAI reservation API for available slots"""
     headers = {
-        "User-Agent": "Mozilla/5.0"
+        "User-Agent": "Mozilla/5.0",
+        "Accept": "application/json"
     }
 
-    r = requests.get(URL, headers=headers, timeout=30)
-    html = r.text
+    try:
+        r = requests.get(API_URL, headers=headers, timeout=30)
 
-    return KEYWORD not in html
+        if r.status_code != 200:
+            print("Bad response:", r.status_code)
+            return False
+
+        data = r.json()
+
+        # Look for any slot > 0
+        for day in data.get("availability", []):
+            for slot in day.get("timeslots", []):
+                if slot.get("available", 0) > 0:
+                    print("Available slot detected:", day.get("date"), slot.get("time"))
+                    return True
+
+        return False
+
+    except Exception as e:
+        print("API error:", e)
+        return False
 
 
 def last_alert_time():
@@ -26,7 +48,10 @@ def last_alert_time():
         return 0
 
     with open(STATE_FILE, "r") as f:
-        return int(f.read().strip())
+        try:
+            return int(f.read().strip())
+        except:
+            return 0
 
 
 def save_alert_time(timestamp):
@@ -39,39 +64,41 @@ def send_email():
     password = os.environ["EMAIL_PASSWORD"]
     receiver = os.environ["EMAIL_RECEIVER"]
 
-    subject = "🚨 REMBAYUNG BOOKING OPEN!"
-    body = f"""Booking may be available!
+    subject = "Rembayung Reservation Available!"
+    body = f"""
+Rembayung reservation slot detected.
 
-The page no longer shows "{KEYWORD}"
+BOOK NOW:
+{BOOKING_URL}
 
-Go NOW:
-{URL}
+(This alert will pause for 2 hours after sending.)
 """
 
-    message = f"""From: {sender}
-To: {receiver}
-Subject: {subject}
+    msg = MIMEMultipart()
+    msg["From"] = sender
+    msg["To"] = receiver
+    msg["Subject"] = subject
 
-{body}
-"""
+    msg.attach(MIMEText(body, "plain", "utf-8"))
 
     with smtplib.SMTP_SSL("smtp.gmail.com", 465) as smtp:
         smtp.login(sender, password)
-        smtp.sendmail(sender, receiver, message)
+        smtp.sendmail(sender, receiver, msg.as_string())
 
 
+# ---------- MAIN ----------
 if __name__ == "__main__":
     now = int(time.time())
 
-    if page_available():
+    if booking_available():
         last_time = last_alert_time()
         elapsed = now - last_time
 
         if elapsed >= COOLDOWN:
-            print("Booking OPEN — sending email")
+            print("Sending alert email...")
             send_email()
             save_alert_time(now)
         else:
-            print(f"Booking open but in cooldown ({elapsed//60} minutes passed)")
+            print(f"Cooldown active. Next alert allowed in {(COOLDOWN-elapsed)//60} minutes")
     else:
-        print("Still fully booked")
+        print("No slots available")
